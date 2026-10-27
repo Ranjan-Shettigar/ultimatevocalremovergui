@@ -3,11 +3,13 @@ Minimalistic ipywidgets UI for UVR5 audio separation in Kaggle / Jupyter.
 """
 
 import re
+import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 import ipywidgets as widgets
-from IPython.display import display, Audio, HTML, FileLink
+from IPython.display import display, Audio, HTML
 
 from uvr_kaggle import (
     separate,
@@ -60,24 +62,60 @@ def _preview(path_str):
 
 
 def _download_link(path_str):
-    """Return a FileLink for Kaggle/Jupyter download, or a fallback copy instruction."""
+    """
+    Generate a working download link for Kaggle/Jupyter.
+    Links the file directly into the notebook directory with relative href
+    to avoid Kaggle proxy 404 errors, and provides an optional ZIP link.
+    """
     p = Path(path_str)
     if not p.exists():
         return None
 
-    # FileLink works when the file is under the Jupyter server root.
-    # On Kaggle that's /kaggle/working/. If the file is elsewhere, show the path.
-    working = Path("/kaggle/working")
-    try:
-        rel = p.resolve().relative_to(working.resolve())
-        return FileLink(str(working / rel), result_html_prefix="⬇ Download: ")
-    except ValueError:
-        pass
+    # Link or copy file into current notebook directory so relative URL resolves cleanly
+    local_file = Path(p.name)
+    if not local_file.exists() or local_file.resolve() != p.resolve():
+        try:
+            local_file.unlink(missing_ok=True)
+            local_file.symlink_to(p)
+        except Exception:
+            try:
+                shutil.copy2(p, local_file)
+            except Exception:
+                pass
 
-    # Fallback: show copy-paste path
-    return HTML(
-        f'<span style="font-size:13px;color:#555;">📁 File at: <code>{p}</code></span>'
-    )
+    # Also prepare a zip file in the current directory for 100% reliable Kaggle downloading
+    zip_file = Path(f"{p.stem}.zip")
+    if not zip_file.exists():
+        try:
+            with zipfile.ZipFile(zip_file, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(p, arcname=p.name)
+        except Exception:
+            pass
+
+    size_mb = p.stat().st_size / (1024 * 1024)
+    links_html = f"""
+    <div style="margin-top:8px;font-size:13px;line-height:1.8;">
+        <span>⬇ <b>Download:</b> </span>
+        <a href="{local_file.name}" download="{local_file.name}" target="_blank" style="color:#2563eb;text-decoration:underline;font-weight:500;margin-right:10px;">
+            {local_file.name} ({size_mb:.1f} MB)
+        </a>
+    """
+    if zip_file.exists():
+        zip_mb = zip_file.stat().st_size / (1024 * 1024)
+        links_html += f"""
+        <span style="color:#94a3b8;">|</span>
+        <a href="{zip_file.name}" download="{zip_file.name}" target="_blank" style="color:#2563eb;text-decoration:underline;margin-left:10px;">
+            📦 Download as ZIP ({zip_mb:.1f} MB)
+        </a>
+        """
+
+    links_html += f"""
+        <div style="color:#64748b;font-size:11px;margin-top:4px;">
+            💡 You can also download from Kaggle's right sidebar under <b>Data ➔ Output (/kaggle/working)</b>.
+        </div>
+    </div>
+    """
+    return HTML(links_html)
 
 
 def _collect_stems(dirs, fallback_dir):
@@ -346,10 +384,29 @@ def create_uvr_ui():
                     f"<td style='padding:4px 8px;color:#666;'>{s.stat().st_size/(1024*1024):.1f} MB</td></tr>"
                     for s in stems
                 )
+                all_zip_html = ""
+                if len(stems) > 1:
+                    all_zip = Path("all_stems.zip")
+                    try:
+                        with zipfile.ZipFile(all_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                            for s in stems:
+                                zf.write(s, arcname=s.name)
+                        zip_mb = all_zip.stat().st_size / (1024 * 1024)
+                        all_zip_html = (
+                            f"<div style='margin: 8px 0 10px 0;'>"
+                            f"<a href='{all_zip.name}' download='{all_zip.name}' target='_blank' "
+                            f"style='display:inline-block;padding:6px 14px;background:#2563eb;color:#fff;"
+                            f"border-radius:6px;text-decoration:none;font-size:12px;font-weight:500;'>"
+                            f"📦 Download All Stems as ZIP ({zip_mb:.1f} MB)</a></div>"
+                        )
+                    except Exception:
+                        pass
+
                 display(HTML(
                     f"<details open style='margin:8px 0;'>"
                     f"<summary style='cursor:pointer;font-weight:600;'>Output files ({len(stems)})</summary>"
                     f"<table style='font-size:13px;margin-top:4px;'>{rows}</table></details>"
+                    f"{all_zip_html}"
                 ))
 
                 # Player + download
