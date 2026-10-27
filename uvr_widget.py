@@ -179,6 +179,15 @@ def create_uvr_ui():
     )
 
     # --- Output areas ---
+    progress = widgets.IntProgress(
+        value=0, min=0, max=1,
+        bar_style="info",
+        layout=widgets.Layout(width="96%", visibility="hidden"),
+    )
+    progress_label = widgets.HTML(
+        value="",
+        layout=widgets.Layout(visibility="hidden"),
+    )
     log_out = widgets.Output(layout=widgets.Layout(
         max_height="240px", overflow="auto",
         border="1px solid #ddd", padding="8px", margin="8px 0",
@@ -186,6 +195,35 @@ def create_uvr_ui():
     result_out = widgets.Output()
 
     # --- Run logic ---
+    def _build_steps(task, ac):
+        """Return list of (label, callable) steps for the chosen task."""
+        steps = []
+        if task in {"vocal", "all"}:
+            steps.append(("BS-RoFormer (vocals)", lambda inp, s=ac: _sep(inp, "bs_roformer", extra=s)))
+        if task == "all":
+            steps.append(("Kim Vocal 2", lambda inp, s=ac: _sep(inp, "kim_vocal_2", stem="Vocals", extra=s)))
+        if task in {"instrumental", "all"}:
+            steps.append(("MDX-Net Inst HQ3", lambda inp, s=ac: _sep(inp, "inst_hq_3", stem="Instrumental", extra=s)))
+        if task == "all":
+            steps.append(("MDX23C", lambda inp, s=ac: _sep(
+                inp, "mdx23c_instvoc",
+                extra=["--mdxc_segment_size", "256", "--mdxc_overlap", "8", *s])))
+        if task in {"stems4", "all"}:
+            steps.append(("HTDemucs 4-stem", lambda inp, s=ac: _sep(
+                inp, "htdemucs",
+                extra=["--demucs_shifts", "1", "--demucs_overlap", "0.25",
+                       "--demucs_segments_enabled", "True", *s])))
+        if task in {"stems6", "all"}:
+            steps.append(("Demucs 6-stem", lambda inp, s=ac: _sep(
+                inp, "demucs_6stem",
+                extra=["--demucs_shifts", "1", "--demucs_overlap", "0.25",
+                       "--demucs_segments_enabled", "True", *s])))
+        if task in {"cleanup", "all"}:
+            steps.append(("__cleanup__", None))
+        if task in {"karaoke", "all"}:
+            steps.append(("__karaoke__", None))
+        return steps
+
     def _run(_):
         inp = Path(input_text.value.strip())
         out_dir = Path(out_text.value.strip())
@@ -219,43 +257,50 @@ def create_uvr_ui():
                 created.append(Path(d))
             return d
 
+        steps = _build_steps(task, ac)
+        total = len(steps)
+        progress.max = total
+        progress.value = 0
+        progress.bar_style = "info"
+        progress.layout.visibility = "visible"
+        progress_label.layout.visibility = "visible"
+
         try:
             with log_out:
                 print(f"Input: {inp.name}  |  Task: {task}  |  Format: {fmt}")
                 print("-" * 40)
 
-                if task in {"vocal", "all"}:
-                    _sep(inp, "bs_roformer", extra=ac)
-                if task == "all":
-                    _sep(inp, "kim_vocal_2", stem="Vocals", extra=ac)
-                if task in {"instrumental", "all"}:
-                    _sep(inp, "inst_hq_3", stem="Instrumental", extra=ac)
-                if task == "all":
-                    _sep(inp, "mdx23c_instvoc",
-                         extra=["--mdxc_segment_size", "256", "--mdxc_overlap", "8", *ac])
-                if task in {"stems4", "all"}:
-                    _sep(inp, "htdemucs",
-                         extra=["--demucs_shifts", "1", "--demucs_overlap", "0.25",
-                                "--demucs_segments_enabled", "True", *ac])
-                if task in {"stems6", "all"}:
-                    _sep(inp, "demucs_6stem",
-                         extra=["--demucs_shifts", "1", "--demucs_overlap", "0.25",
-                                "--demucs_segments_enabled", "True", *ac])
-                if task in {"cleanup", "all"}:
-                    vf = find_stem(out_dir / "bs_roformer", ["vocal"])
-                    if vf:
-                        _sep(vf, "bip_reverb", stem="Vocals", extra=ac)
-                        _sep(vf, "deecho", stem="Vocals", extra=ac)
+                for i, (label, fn) in enumerate(steps):
+                    progress_label.value = (
+                        f'<span style="font-size:13px;">'
+                        f'Step {i+1}/{total}: <b>{label}</b></span>'
+                    )
+
+                    if label == "__cleanup__":
+                        vf = find_stem(out_dir / "bs_roformer", ["vocal"])
+                        if vf:
+                            _sep(vf, "bip_reverb", stem="Vocals", extra=ac)
+                            _sep(vf, "deecho", stem="Vocals", extra=ac)
+                        else:
+                            print("⚠ No vocal stem found for cleanup.")
+                    elif label == "__karaoke__":
+                        inf = find_stem(out_dir / "bs_roformer", ["instrumental"])
+                        if inf:
+                            _sep(inf, "kara_2", stem="Instrumental", extra=ac)
+                        else:
+                            print("⚠ No instrumental stem found for karaoke.")
                     else:
-                        print("⚠ No vocal stem found for cleanup.")
-                if task in {"karaoke", "all"}:
-                    inf = find_stem(out_dir / "bs_roformer", ["instrumental"])
-                    if inf:
-                        _sep(inf, "kara_2", stem="Instrumental", extra=ac)
-                    else:
-                        print("⚠ No instrumental stem found for karaoke.")
+                        fn(inp)
+
+                    progress.value = i + 1
 
                 print("\n✅ Done.")
+
+            progress.bar_style = "success"
+            progress_label.value = (
+                f'<span style="font-size:13px;color:green;">'
+                f'✅ Completed {total} step(s)</span>'
+            )
 
             # --- Results ---
             stems = _collect_stems(created, out_dir)
@@ -308,6 +353,10 @@ def create_uvr_ui():
         except Exception as exc:
             with log_out:
                 print(f"\n❌ {exc}")
+            progress.bar_style = "danger"
+            progress_label.value = (
+                f'<span style="font-size:13px;color:red;">❌ Failed</span>'
+            )
         finally:
             run_btn.disabled = False
             run_btn.description = "Separate"
