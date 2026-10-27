@@ -1,0 +1,51 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# Test, coverage, and build artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local application state
+gui_data/saved_settings/*
+!gui_data/saved_settings/saved_settings_go_here.txt
+gui_data/saved_ensembles/*
+!gui_data/saved_ensembles/saved_ensembles_go_here.txt
+
+# Downloaded model weights and checkpoints
+models/**/*.bin
+models/**/*.ckpt
+models/**/*.onnx
+models/**/*.pth
+models/**/*.pt
+models/**/*.safetensors
+
+# Generated audio and application output
+outputs/
+uvr_outputs/
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.ogg
+
+# Local tools and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

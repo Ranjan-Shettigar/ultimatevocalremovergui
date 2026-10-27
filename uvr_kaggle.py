@@ -230,6 +230,8 @@ def separate(
     output_dir,
     single_stem=None,
     extra_args=None,
+    output_format="WAV",
+    use_soundfile=False,
 ):
     """
     Run one model through audio-separator.
@@ -249,13 +251,15 @@ def separate(
         "--output_dir",
         str(job_dir),
         "--output_format",
-        "WAV",
+        output_format,
         "--sample_rate",
         "44100",
         "--normalization",
         "0.9",
-        "--use_soundfile",
     ]
+
+    if use_soundfile:
+        command.append("--use_soundfile")
 
     if single_stem:
         command.extend(["--single_stem", single_stem])
@@ -275,7 +279,10 @@ def find_stem(directory, keywords):
     """
     Find a generated stem by filename keywords.
     """
-    candidates = list(directory.rglob("*.wav"))
+    candidates = [
+        p for p in directory.rglob("*")
+        if p.is_file() and p.suffix.lower() in {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
+    ]
 
     for path in candidates:
         name = path.name.lower()
@@ -323,6 +330,22 @@ def main():
     )
 
     parser.add_argument(
+        "--output_format",
+        default="WAV",
+        choices=["WAV", "FLAC", "MP3"],
+        help="Output audio format (WAV, FLAC, MP3). Default: WAV",
+    )
+
+    parser.add_argument(
+        "--use_soundfile",
+        action="store_true",
+        help=(
+            "Use soundfile for output writing. Note: do not use with MP3 "
+            "inputs in audio-separator due to a libsndfile subtype bug."
+        ),
+    )
+
+    parser.add_argument(
         "--use_fp16",
         action="store_true",
         help="Enable autocast to reduce GPU memory usage.",
@@ -336,6 +359,13 @@ def main():
     if not input_file.exists():
         raise FileNotFoundError(f"Input file not found: {input_file}")
 
+    if args.use_soundfile and input_file.suffix.lower() not in {".wav", ".flac"}:
+        print(
+            f"WARNING: --use_soundfile is active with non-PCM/MP3 input '{input_file.name}'. "
+            "audio-separator <= 0.47 will fail with LibsndfileError (unsupported encoding). "
+            "Consider removing --use_soundfile or pre-converting input to WAV."
+        )
+
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -343,53 +373,61 @@ def main():
     print("Task:", args.task)
     print("Models:", MODEL_DIR)
     print("Outputs:", output_dir)
+    print("Format:", args.output_format)
 
     autocast_args = ["--use_autocast"] if args.use_fp16 else []
+
+    def run_sep(target_input, alias, stem=None, extra=None):
+        return separate(
+            input_file=target_input,
+            model_alias=alias,
+            output_dir=output_dir,
+            single_stem=stem,
+            extra_args=extra,
+            output_format=args.output_format,
+            use_soundfile=args.use_soundfile,
+        )
 
     # ---------------------------------------------------------------
     # 1. Best overall vocal and instrumental separation
     # ---------------------------------------------------------------
     if args.task in {"vocal", "all"}:
-        separate(
-            input_file=input_file,
-            model_alias="bs_roformer",
-            output_dir=output_dir,
-            extra_args=autocast_args,
+        run_sep(
+            target_input=input_file,
+            alias="bs_roformer",
+            extra=autocast_args,
         )
 
     # ---------------------------------------------------------------
     # 2. Kim Vocal 2
     # ---------------------------------------------------------------
     if args.task == "all":
-        separate(
-            input_file=input_file,
-            model_alias="kim_vocal_2",
-            output_dir=output_dir,
-            single_stem="Vocals",
-            extra_args=autocast_args,
+        run_sep(
+            target_input=input_file,
+            alias="kim_vocal_2",
+            stem="Vocals",
+            extra=autocast_args,
         )
 
     # ---------------------------------------------------------------
     # 3. Clean instrumental
     # ---------------------------------------------------------------
     if args.task in {"instrumental", "all"}:
-        separate(
-            input_file=input_file,
-            model_alias="inst_hq_3",
-            output_dir=output_dir,
-            single_stem="Instrumental",
-            extra_args=autocast_args,
+        run_sep(
+            target_input=input_file,
+            alias="inst_hq_3",
+            stem="Instrumental",
+            extra=autocast_args,
         )
 
     # ---------------------------------------------------------------
     # 4. MDX23C instrumental/vocal model
     # ---------------------------------------------------------------
     if args.task == "all":
-        separate(
-            input_file=input_file,
-            model_alias="mdx23c_instvoc",
-            output_dir=output_dir,
-            extra_args=[
+        run_sep(
+            target_input=input_file,
+            alias="mdx23c_instvoc",
+            extra=[
                 "--mdxc_segment_size",
                 "256",
                 "--mdxc_overlap",
@@ -402,11 +440,10 @@ def main():
     # 5. Four stems: vocals, drums, bass, other
     # ---------------------------------------------------------------
     if args.task in {"stems4", "all"}:
-        separate(
-            input_file=input_file,
-            model_alias="htdemucs",
-            output_dir=output_dir,
-            extra_args=[
+        run_sep(
+            target_input=input_file,
+            alias="htdemucs",
+            extra=[
                 "--demucs_shifts",
                 "1",
                 "--demucs_overlap",
@@ -420,11 +457,10 @@ def main():
     # 6. Six stems: vocals, drums, bass, other, guitar, piano
     # ---------------------------------------------------------------
     if args.task in {"stems6", "all"}:
-        separate(
-            input_file=input_file,
-            model_alias="demucs_6stem",
-            output_dir=output_dir,
-            extra_args=[
+        run_sep(
+            target_input=input_file,
+            alias="demucs_6stem",
+            extra=[
                 "--demucs_shifts",
                 "1",
                 "--demucs_overlap",
@@ -447,20 +483,18 @@ def main():
                 "Run --task vocal first or use --task all."
             )
         else:
-            separate(
-                input_file=vocal_file,
-                model_alias="bip_reverb",
-                output_dir=output_dir,
-                single_stem="Vocals",
-                extra_args=autocast_args,
+            run_sep(
+                target_input=vocal_file,
+                alias="bip_reverb",
+                stem="Vocals",
+                extra=autocast_args,
             )
 
-            separate(
-                input_file=vocal_file,
-                model_alias="deecho",
-                output_dir=output_dir,
-                single_stem="Vocals",
-                extra_args=autocast_args,
+            run_sep(
+                target_input=vocal_file,
+                alias="deecho",
+                stem="Vocals",
+                extra=autocast_args,
             )
 
     # ---------------------------------------------------------------
@@ -476,12 +510,11 @@ def main():
                 "Run --task vocal first or use --task all."
             )
         else:
-            separate(
-                input_file=instrumental_file,
-                model_alias="kara_2",
-                output_dir=output_dir,
-                single_stem="Instrumental",
-                extra_args=autocast_args,
+            run_sep(
+                target_input=instrumental_file,
+                alias="kara_2",
+                stem="Instrumental",
+                extra=autocast_args,
             )
 
     print("\nFinished.")
