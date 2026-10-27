@@ -2,12 +2,11 @@
 Minimalistic ipywidgets UI for UVR5 audio separation in Kaggle / Jupyter.
 """
 
-import base64
 import subprocess
 from pathlib import Path
 
 import ipywidgets as widgets
-from IPython.display import display, Audio, HTML
+from IPython.display import display, Audio, HTML, FileLink
 
 from uvr_kaggle import (
     separate,
@@ -60,20 +59,23 @@ def _preview(path_str):
 
 
 def _download_link(path_str):
-    """Return an HTML download link for *path_str* (works in Kaggle/Colab)."""
+    """Return a FileLink for Kaggle/Jupyter download, or a fallback copy instruction."""
     p = Path(path_str)
     if not p.exists():
-        return ""
-    data = base64.b64encode(p.read_bytes()).decode()
-    mime = {
-        ".wav": "audio/wav", ".flac": "audio/flac",
-        ".mp3": "audio/mpeg", ".ogg": "audio/ogg",
-    }.get(p.suffix.lower(), "application/octet-stream")
-    return (
-        f'<a download="{p.name}" href="data:{mime};base64,{data}" '
-        f'style="display:inline-block;padding:6px 16px;background:#2563eb;'
-        f'color:#fff;border-radius:6px;text-decoration:none;font-size:13px;'
-        f'margin-top:6px;">⬇ Download {p.name}</a>'
+        return None
+
+    # FileLink works when the file is under the Jupyter server root.
+    # On Kaggle that's /kaggle/working/. If the file is elsewhere, show the path.
+    working = Path("/kaggle/working")
+    try:
+        rel = p.resolve().relative_to(working.resolve())
+        return FileLink(str(working / rel), result_html_prefix="⬇ Download: ")
+    except ValueError:
+        pass
+
+    # Fallback: show copy-paste path
+    return HTML(
+        f'<span style="font-size:13px;color:#555;">📁 File at: <code>{p}</code></span>'
     )
 
 
@@ -290,8 +292,10 @@ def create_uvr_ui():
                         if pv:
                             with player:
                                 display(Audio(pv))
-                        with dl_area:
-                            display(HTML(_download_link(path_str)))
+                        link = _download_link(path_str)
+                        if link:
+                            with dl_area:
+                                display(link)
 
                 def _on_stem(change):
                     _update_player(change["new"])
