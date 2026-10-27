@@ -1,13 +1,13 @@
 """
-Interactive ipywidgets UI for running UVR5 in Kaggle / Jupyter Notebooks.
+Minimalistic ipywidgets UI for UVR5 audio separation in Kaggle / Jupyter.
 """
 
-import os
-import shutil
+import base64
 import subprocess
 from pathlib import Path
+
 import ipywidgets as widgets
-from IPython.display import display, Audio, HTML, clear_output
+from IPython.display import display, Audio, HTML
 
 from uvr_kaggle import (
     separate,
@@ -17,424 +17,312 @@ from uvr_kaggle import (
     TASKS,
 )
 
-
-AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".wma"}
-
-
-def make_audio_preview(audio_path):
-    """
-    Ensure the audio file is lightweight enough to embed safely in notebook DOM.
-    If a WAV/FLAC file is larger than 10MB, creates a fast 192kbps MP3 preview in /tmp.
-    """
-    path = Path(audio_path)
-    if not path.exists():
-        return None
-
-    # If it's already under 10 MB or is an MP3, use directly
-    if path.stat().st_size <= 10 * 1024 * 1024 or path.suffix.lower() == ".mp3":
-        return str(path)
-
-    # For large WAV/FLAC files, convert to lightweight MP3 preview in /tmp
-    preview_path = Path(f"/tmp/{path.stem}_preview.mp3")
-    if not preview_path.exists():
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(path),
-            "-b:a", "192k",
-            "-loglevel", "error",
-            str(preview_path),
-        ]
-        try:
-            subprocess.run(cmd, check=True)
-        except Exception:
-            return str(path)
-
-    return str(preview_path)
+AUDIO_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".wma"}
+_STEM_EXTS = {".wav", ".flac", ".mp3", ".ogg"}
 
 
-def scan_audio_files(search_paths=None):
-    """Scan common directories for audio files."""
-    if search_paths is None:
-        search_paths = [
-            Path("/kaggle/input"),
-            Path("/kaggle/working"),
-            Path("."),
-        ]
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
 
+def _scan(paths=None):
+    """Return sorted list of audio file paths found under *paths*."""
+    paths = paths or [Path("/kaggle/input"), Path("/kaggle/working"), Path(".")]
     found = []
-    for base in search_paths:
+    for base in paths:
         if base.exists():
-            for ext in AUDIO_EXTENSIONS:
-                for file_path in base.rglob(f"*{ext}"):
-                    # Skip temporary files or output files
-                    if ".ipynb_checkpoints" in str(file_path):
-                        continue
-                    found.append(str(file_path.resolve()))
+            for ext in AUDIO_EXTS:
+                found.extend(
+                    str(p.resolve())
+                    for p in base.rglob(f"*{ext}")
+                    if ".ipynb_checkpoints" not in str(p)
+                )
+    return sorted(dict.fromkeys(found))
 
-    return sorted(list(dict.fromkeys(found)))
 
+def _preview(path_str):
+    """Return a path suitable for in-notebook playback (≤10 MB)."""
+    p = Path(path_str)
+    if not p.exists():
+        return None
+    if p.stat().st_size <= 10 * 1024 * 1024 or p.suffix.lower() == ".mp3":
+        return str(p)
+    prev = Path(f"/tmp/{p.stem}_preview.mp3")
+    if not prev.exists():
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(p), "-b:a", "192k", "-loglevel", "error", str(prev)],
+                check=True,
+            )
+        except Exception:
+            return str(p)
+    return str(prev)
+
+
+def _download_link(path_str):
+    """Return an HTML download link for *path_str* (works in Kaggle/Colab)."""
+    p = Path(path_str)
+    if not p.exists():
+        return ""
+    data = base64.b64encode(p.read_bytes()).decode()
+    mime = {
+        ".wav": "audio/wav", ".flac": "audio/flac",
+        ".mp3": "audio/mpeg", ".ogg": "audio/ogg",
+    }.get(p.suffix.lower(), "application/octet-stream")
+    return (
+        f'<a download="{p.name}" href="data:{mime};base64,{data}" '
+        f'style="display:inline-block;padding:6px 16px;background:#2563eb;'
+        f'color:#fff;border-radius:6px;text-decoration:none;font-size:13px;'
+        f'margin-top:6px;">⬇ Download {p.name}</a>'
+    )
+
+
+def _collect_stems(dirs, fallback_dir):
+    """Gather output stem files from *dirs*, falling back to *fallback_dir*."""
+    stems = []
+    for d in dirs:
+        if d.exists():
+            stems.extend(
+                p for p in d.rglob("*")
+                if p.is_file() and p.suffix.lower() in _STEM_EXTS
+                and "_preview" not in p.name
+            )
+    if not stems:
+        stems = [
+            p for p in fallback_dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in _STEM_EXTS
+            and "_preview" not in p.name
+        ]
+    return sorted(dict.fromkeys(stems))
+
+
+# ------------------------------------------------------------------
+# UI
+# ------------------------------------------------------------------
 
 def create_uvr_ui():
-    """Build and display the ipywidgets UVR interface."""
+    """Build and display the widget UI."""
 
-    # 1. Header
+    # --- Header ---
     header = widgets.HTML(
-        """
-        <div style="background: linear-gradient(135deg, #1e293b, #0f172a); padding: 16px 20px; border-radius: 10px; margin-bottom: 12px; color: #f8fafc;">
-            <h2 style="margin: 0 0 6px 0; color: #38bdf8;">🎵 UVR5 Headless Separator</h2>
-            <p style="margin: 0; font-size: 13px; color: #94a3b8;">
-                High-quality vocal, instrumental, and multi-stem audio separation powered by BS-RoFormer & Demucs.
-            </p>
-        </div>
-        """
+        '<h3 style="margin:0 0 10px 0;">🎵 UVR5 Audio Separator</h3>'
     )
 
-    # 2. File Input Mode
-    scanned_files = scan_audio_files()
-    def get_file_options():
-        files = scan_audio_files()
-        return [("Select a discovered file...", "")] + [
-            (f"{Path(f).name} ({Path(f).parent.name})", f) for f in files
-        ] + [("Enter custom path below...", "__CUSTOM__")]
+    # --- Input file ---
+    scanned = _scan()
 
-    dropdown_file = widgets.Dropdown(
-        options=get_file_options(),
-        value="" if not scanned_files else get_file_options()[1][1],
-        description="Found Files:",
-        style={"description_width": "110px"},
-        layout=widgets.Layout(width="75%"),
+    def _opts():
+        fs = _scan()
+        return [("— select —", "")] + [
+            (Path(f).name, f) for f in fs
+        ] + [("custom path ↓", "__CUSTOM__")]
+
+    file_dd = widgets.Dropdown(
+        options=_opts(),
+        value=_opts()[1][1] if scanned else "",
+        description="Input:",
+        layout=widgets.Layout(width="80%"),
+    )
+    scan_btn = widgets.Button(description="⟳", tooltip="Rescan", layout=widgets.Layout(width="15%"))
+    input_text = widgets.Text(
+        value=scanned[0] if scanned else "",
+        placeholder="/path/to/audio.mp3",
+        description="Path:",
+        layout=widgets.Layout(width="96%"),
     )
 
-    refresh_btn = widgets.Button(
-        description="Scan",
-        tooltip="Rescan for audio files in /kaggle/input and working directory",
-        icon="refresh",
-        layout=widgets.Layout(width="18%"),
-    )
+    def _on_scan(_):
+        file_dd.options = _opts()
+        if len(file_dd.options) > 1 and file_dd.options[1][1] != "__CUSTOM__":
+            file_dd.value = file_dd.options[1][1]
+            input_text.value = file_dd.value
+    scan_btn.on_click(_on_scan)
 
-    file_picker_row = widgets.HBox([dropdown_file, refresh_btn])
-
-    custom_input_text = widgets.Text(
-        value="/kaggle/input/datasets/lokotwist/singari/singari.mp3",
-        placeholder="/path/to/song.mp3",
-        description="Audio Path:",
-        style={"description_width": "110px"},
-        layout=widgets.Layout(width="95%"),
-    )
-
-    def on_refresh_clicked(_):
-        dropdown_file.options = get_file_options()
-        if len(dropdown_file.options) > 1 and dropdown_file.options[1][1] != "__CUSTOM__":
-            dropdown_file.value = dropdown_file.options[1][1]
-            custom_input_text.value = dropdown_file.value
-
-    refresh_btn.on_click(on_refresh_clicked)
-
-    def on_dropdown_change(change):
+    def _on_dd(change):
         if change["new"] and change["new"] != "__CUSTOM__":
-            custom_input_text.value = change["new"]
+            input_text.value = change["new"]
+    file_dd.observe(_on_dd, names="value")
 
-    dropdown_file.observe(on_dropdown_change, names="value")
-
-    # 3. Task Selection
-    task_options = [
-        ("🎤 Vocals & Instrumental (BS-RoFormer - Best SDR)", "vocal"),
-        ("🎹 Clean Instrumental (UVR-MDX-Net Inst HQ 3)", "instrumental"),
-        ("🥁 4 Stems: Vocals, Drums, Bass, Other (HTDemucs)", "stems4"),
-        ("🎸 6 Stems: Vocals, Drums, Bass, Other, Guitar, Piano (Demucs 6s)", "stems6"),
-        ("🧹 Vocal Cleanup (De-Echo & Dereverb)", "cleanup"),
-        ("🎤 Backing Vocals / Harmonies Filter (Kara 2)", "karaoke"),
-        ("🌟 Full Pipeline / All Models", "all"),
-    ]
-
-    task_dropdown = widgets.Dropdown(
-        options=task_options,
+    # --- Task ---
+    task_dd = widgets.Dropdown(
+        options=[
+            ("Vocals + Instrumental  (BS-RoFormer)", "vocal"),
+            ("Instrumental only  (MDX-Net HQ3)", "instrumental"),
+            ("4 stems  (HTDemucs)", "stems4"),
+            ("6 stems  (Demucs 6s)", "stems6"),
+            ("Vocal cleanup  (De-echo/reverb)", "cleanup"),
+            ("Karaoke  (Remove harmonies)", "karaoke"),
+            ("Full pipeline  (all models)", "all"),
+        ],
         value="vocal",
-        description="Task / Model:",
-        style={"description_width": "110px"},
-        layout=widgets.Layout(width="95%"),
+        description="Task:",
+        layout=widgets.Layout(width="96%"),
     )
 
-    # 4. Settings
-    format_dropdown = widgets.Dropdown(
-        options=["WAV", "FLAC", "MP3"],
-        value="WAV",
-        description="Format:",
-        style={"description_width": "80px"},
-        layout=widgets.Layout(width="180px"),
+    # --- Options row ---
+    fmt_dd = widgets.Dropdown(
+        options=["WAV", "FLAC", "MP3"], value="WAV",
+        description="Format:", layout=widgets.Layout(width="160px"),
+    )
+    fp16_cb = widgets.Checkbox(value=True, description="FP16", indent=False)
+    out_text = widgets.Text(
+        value=str(OUTPUT_DIR), description="Output:",
+        layout=widgets.Layout(width="96%"),
     )
 
-    fp16_checkbox = widgets.Checkbox(
-        value=True,
-        description="FP16 Autocast (Faster GPU inference & lower VRAM)",
-        style={"description_width": "initial"},
+    # --- Run button ---
+    run_btn = widgets.Button(
+        description="Separate", button_style="primary", icon="play",
+        layout=widgets.Layout(width="140px", height="36px"),
     )
 
-    output_dir_text = widgets.Text(
-        value=str(OUTPUT_DIR),
-        description="Output Dir:",
-        style={"description_width": "110px"},
-        layout=widgets.Layout(width="95%"),
-    )
+    # --- Output areas ---
+    log_out = widgets.Output(layout=widgets.Layout(
+        max_height="240px", overflow="auto",
+        border="1px solid #ddd", padding="8px", margin="8px 0",
+    ))
+    result_out = widgets.Output()
 
-    # 5. Separation Button
-    separate_btn = widgets.Button(
-        description=" Start Separation",
-        button_style="primary",
-        icon="play",
-        layout=widgets.Layout(width="220px", height="42px", margin="12px 0"),
-    )
+    # --- Run logic ---
+    def _run(_):
+        inp = Path(input_text.value.strip())
+        out_dir = Path(out_text.value.strip())
+        task = task_dd.value
+        fmt = fmt_dd.value
+        fp16 = fp16_cb.value
 
-    # 6. Output log area & audio players
-    log_output = widgets.Output(
-        layout=widgets.Layout(
-            border="1px solid #334155",
-            padding="10px",
-            max_height="320px",
-            overflow="auto",
-            margin="10px 0",
-        )
-    )
+        log_out.clear_output()
+        result_out.clear_output()
 
-    players_output = widgets.Output()
-
-    def run_separation_ui(_):
-        input_path = Path(custom_input_text.value.strip())
-        out_base_dir = Path(output_dir_text.value.strip())
-        task = task_dropdown.value
-        fmt = format_dropdown.value
-        use_fp16 = fp16_checkbox.value
-
-        players_output.clear_output()
-        log_output.clear_output()
-
-        if not input_path.exists():
-            with log_output:
-                print(f"❌ Error: Input file does not exist: {input_path}")
+        if not inp.exists():
+            with log_out:
+                print(f"❌ File not found: {inp}")
             return
 
-        separate_btn.disabled = True
-        separate_btn.description = " Separating..."
-        separate_btn.button_style = "warning"
-        separate_btn.icon = "hourglass-half"
+        run_btn.disabled = True
+        run_btn.description = "Running…"
+        run_btn.button_style = "warning"
 
-        out_base_dir.mkdir(parents=True, exist_ok=True)
-        autocast_args = ["--use_autocast"] if use_fp16 else []
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ac = ["--use_autocast"] if fp16 else []
+        created = []
 
-        with log_output:
-            print(f"▶ Input Audio: {input_path}")
-            print(f"▶ Task: {task}")
-            print(f"▶ Output Format: {fmt}")
-            print(f"▶ Autocast (FP16): {use_fp16}")
-            print(f"▶ Output Dir: {out_base_dir}")
-            print("-" * 50)
-
-        created_dirs = []
-
-        def do_sep(inp, alias, stem=None, extra=None):
-            jdir = separate(
-                input_file=inp,
-                model_alias=alias,
-                output_dir=out_base_dir,
-                single_stem=stem,
-                extra_args=extra,
-                output_format=fmt,
-                use_soundfile=False,
+        def _sep(f, alias, stem=None, extra=None):
+            d = separate(
+                input_file=f, model_alias=alias, output_dir=out_dir,
+                single_stem=stem, extra_args=extra,
+                output_format=fmt, use_soundfile=False,
             )
-            if jdir:
-                created_dirs.append(Path(jdir))
-            return jdir
+            if d:
+                created.append(Path(d))
+            return d
 
         try:
-            with log_output:
+            with log_out:
+                print(f"Input: {inp.name}  |  Task: {task}  |  Format: {fmt}")
+                print("-" * 40)
+
                 if task in {"vocal", "all"}:
-                    do_sep(input_path, "bs_roformer", extra=autocast_args)
-
+                    _sep(inp, "bs_roformer", extra=ac)
                 if task == "all":
-                    do_sep(input_path, "kim_vocal_2", stem="Vocals", extra=autocast_args)
-
+                    _sep(inp, "kim_vocal_2", stem="Vocals", extra=ac)
                 if task in {"instrumental", "all"}:
-                    do_sep(input_path, "inst_hq_3", stem="Instrumental", extra=autocast_args)
-
+                    _sep(inp, "inst_hq_3", stem="Instrumental", extra=ac)
                 if task == "all":
-                    do_sep(
-                        input_path,
-                        "mdx23c_instvoc",
-                        extra=[
-                            "--mdxc_segment_size",
-                            "256",
-                            "--mdxc_overlap",
-                            "8",
-                            *autocast_args,
-                        ],
-                    )
-
+                    _sep(inp, "mdx23c_instvoc",
+                         extra=["--mdxc_segment_size", "256", "--mdxc_overlap", "8", *ac])
                 if task in {"stems4", "all"}:
-                    do_sep(
-                        input_path,
-                        "htdemucs",
-                        extra=[
-                            "--demucs_shifts",
-                            "1",
-                            "--demucs_overlap",
-                            "0.25",
-                            "--demucs_segments_enabled",
-                            "True",
-                            *autocast_args,
-                        ],
-                    )
-
+                    _sep(inp, "htdemucs",
+                         extra=["--demucs_shifts", "1", "--demucs_overlap", "0.25",
+                                "--demucs_segments_enabled", "True", *ac])
                 if task in {"stems6", "all"}:
-                    do_sep(
-                        input_path,
-                        "demucs_6stem",
-                        extra=[
-                            "--demucs_shifts",
-                            "1",
-                            "--demucs_overlap",
-                            "0.25",
-                            "--demucs_segments_enabled",
-                            "True",
-                            *autocast_args,
-                        ],
-                    )
-
+                    _sep(inp, "demucs_6stem",
+                         extra=["--demucs_shifts", "1", "--demucs_overlap", "0.25",
+                                "--demucs_segments_enabled", "True", *ac])
                 if task in {"cleanup", "all"}:
-                    bs_dir = out_base_dir / "bs_roformer"
-                    vocal_file = find_stem(bs_dir, ["vocal"])
-                    if vocal_file:
-                        do_sep(vocal_file, "bip_reverb", stem="Vocals", extra=autocast_args)
-                        do_sep(vocal_file, "deecho", stem="Vocals", extra=autocast_args)
+                    vf = find_stem(out_dir / "bs_roformer", ["vocal"])
+                    if vf:
+                        _sep(vf, "bip_reverb", stem="Vocals", extra=ac)
+                        _sep(vf, "deecho", stem="Vocals", extra=ac)
                     else:
-                        print("⚠ No BS-RoFormer vocal found to clean.")
-
+                        print("⚠ No vocal stem found for cleanup.")
                 if task in {"karaoke", "all"}:
-                    bs_dir = out_base_dir / "bs_roformer"
-                    inst_file = find_stem(bs_dir, ["instrumental"])
-                    if inst_file:
-                        do_sep(inst_file, "kara_2", stem="Instrumental", extra=autocast_args)
+                    inf = find_stem(out_dir / "bs_roformer", ["instrumental"])
+                    if inf:
+                        _sep(inf, "kara_2", stem="Instrumental", extra=ac)
                     else:
-                        print("⚠ No BS-RoFormer instrumental found for karaoke processing.")
+                        print("⚠ No instrumental stem found for karaoke.")
 
-                print("\n✅ Separation successfully completed!")
+                print("\n✅ Done.")
 
-            # 7. Render Audio Players for outputs
-            with players_output:
-                stems = []
-                for d in created_dirs:
-                    if d.exists():
-                        stems.extend([
-                            p for p in d.rglob("*")
-                            if p.is_file() and p.suffix.lower() in {".wav", ".flac", ".mp3", ".ogg"}
-                            and not p.name.endswith("_preview.mp3")
-                        ])
+            # --- Results ---
+            stems = _collect_stems(created, out_dir)
+            if not stems:
+                return
 
-                if not stems:
-                    stems = [
-                        p for p in out_base_dir.rglob("*")
-                        if p.is_file() and p.suffix.lower() in {".wav", ".flac", ".mp3", ".ogg"}
-                        and not p.name.endswith("_preview.mp3")
-                    ]
+            with result_out:
+                # File list
+                rows = "".join(
+                    f"<tr><td style='padding:4px 8px;'>{s.name}</td>"
+                    f"<td style='padding:4px 8px;color:#666;'>{s.stat().st_size/(1024*1024):.1f} MB</td></tr>"
+                    for s in stems
+                )
+                display(HTML(
+                    f"<details open style='margin:8px 0;'>"
+                    f"<summary style='cursor:pointer;font-weight:600;'>Output files ({len(stems)})</summary>"
+                    f"<table style='font-size:13px;margin-top:4px;'>{rows}</table></details>"
+                ))
 
-                stems = sorted(list(dict.fromkeys(stems)))
+                # Player + download
+                opts = [(p.name, str(p)) for p in stems]
+                stem_dd = widgets.Dropdown(
+                    options=opts, value=opts[0][1],
+                    description="Stem:", layout=widgets.Layout(width="70%"),
+                )
+                player = widgets.Output()
+                dl_area = widgets.Output()
 
-                if stems:
-                    rows_html = "".join([
-                        f"""<tr style="border-bottom: 1px solid #334155;">
-                            <td style="padding: 6px 10px; font-weight: 500; color: #38bdf8;">{s.name}</td>
-                            <td style="padding: 6px 10px; color: #94a3b8;">{s.stat().st_size / (1024*1024):.2f} MB</td>
-                            <td style="padding: 6px 10px; font-family: monospace; font-size: 11px; color: #64748b;">{s}</td>
-                        </tr>""" for s in stems
-                    ])
+                def _update_player(path_str):
+                    player.clear_output()
+                    dl_area.clear_output()
+                    if path_str:
+                        pv = _preview(path_str)
+                        if pv:
+                            with player:
+                                display(Audio(pv))
+                        with dl_area:
+                            display(HTML(_download_link(path_str)))
 
-                    summary_card = widgets.HTML(f"""
-                    <div style="background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-top: 10px;">
-                        <h4 style="margin: 0 0 8px 0; color: #4ade80;">🎧 Separated Stems ({len(stems)} files)</h4>
-                        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-                            <thead>
-                                <tr style="border-bottom: 2px solid #475569; text-align: left; color: #e2e8f0;">
-                                    <th style="padding: 6px 10px;">File Name</th>
-                                    <th style="padding: 6px 10px;">Size</th>
-                                    <th style="padding: 6px 10px;">Location</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {rows_html}
-                            </tbody>
-                        </table>
-                    </div>
-                    """)
+                def _on_stem(change):
+                    _update_player(change["new"])
+                stem_dd.observe(_on_stem, names="value")
 
-                    stem_options = [(f"{p.name} ({p.stat().st_size / (1024*1024):.1f} MB)", str(p)) for p in stems]
-                    stem_dropdown = widgets.Dropdown(
-                        options=stem_options,
-                        value=stem_options[0][1],
-                        description="Play Stem:",
-                        style={"description_width": "85px"},
-                        layout=widgets.Layout(width="75%"),
-                    )
+                _update_player(opts[0][1])
 
-                    play_area = widgets.Output(layout=widgets.Layout(margin="10px 0"))
-
-                    def on_stem_select(change):
-                        play_area.clear_output()
-                        if change["new"]:
-                            with play_area:
-                                prev_file = make_audio_preview(change["new"])
-                                if prev_file:
-                                    display(Audio(prev_file))
-
-                    stem_dropdown.observe(on_stem_select, names="value")
-
-                    # Initial playback
-                    with play_area:
-                        init_prev = make_audio_preview(stem_options[0][1])
-                        if init_prev:
-                            display(Audio(init_prev))
-
-                    display(widgets.VBox([
-                        summary_card,
-                        widgets.HTML("<div style='margin-top: 12px; font-weight: bold; color: #f8fafc;'>Select stem to play:</div>"),
-                        stem_dropdown,
-                        play_area,
-                    ]))
+                display(widgets.VBox([stem_dd, player, dl_area]))
 
         except Exception as exc:
-            with log_output:
-                print(f"\n❌ Error during separation: {exc}")
+            with log_out:
+                print(f"\n❌ {exc}")
         finally:
-            separate_btn.disabled = False
-            separate_btn.description = " Start Separation"
-            separate_btn.button_style = "primary"
-            separate_btn.icon = "play"
+            run_btn.disabled = False
+            run_btn.description = "Separate"
+            run_btn.button_style = "primary"
 
-    separate_btn.on_click(run_separation_ui)
+    run_btn.on_click(_run)
 
-    # Layout assembly
-    options_box = widgets.HBox([format_dropdown, fp16_checkbox])
-
-    main_box = widgets.VBox(
-        [
-            header,
-            file_picker_row,
-            custom_input_text,
-            task_dropdown,
-            options_box,
-            output_dir_text,
-            separate_btn,
-            widgets.HTML("<b>Console Logs:</b>"),
-            log_output,
-            players_output,
-        ],
-        layout=widgets.Layout(
-            max_width="780px",
-            padding="12px",
-            border="1px solid #cbd5e1",
-            border_radius="10px",
-        ),
-    )
-
-    display(main_box)
+    # --- Layout ---
+    display(widgets.VBox([
+        header,
+        widgets.HBox([file_dd, scan_btn]),
+        input_text,
+        task_dd,
+        widgets.HBox([fmt_dd, fp16_cb]),
+        out_text,
+        run_btn,
+        log_out,
+        result_out,
+    ], layout=widgets.Layout(max_width="700px", padding="10px")))
 
 
 def render_ui():
