@@ -449,6 +449,7 @@ def main():
                 "--demucs_overlap",
                 "0.25",
                 "--demucs_segments_enabled",
+                "True",
                 *autocast_args,
             ],
         )
@@ -466,6 +467,7 @@ def main():
                 "--demucs_overlap",
                 "0.25",
                 "--demucs_segments_enabled",
+                "True",
                 *autocast_args,
             ],
         )

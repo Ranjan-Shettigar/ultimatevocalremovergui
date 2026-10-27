@@ -242,6 +242,7 @@ def create_uvr_ui():
                             "--demucs_overlap",
                             "0.25",
                             "--demucs_segments_enabled",
+                            "True",
                             *autocast_args,
                         ],
                     )
@@ -256,6 +257,7 @@ def create_uvr_ui():
                             "--demucs_overlap",
                             "0.25",
                             "--demucs_segments_enabled",
+                            "True",
                             *autocast_args,
                         ],
                     )
