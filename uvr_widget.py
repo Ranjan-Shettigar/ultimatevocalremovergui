@@ -4,6 +4,7 @@ Interactive ipywidgets UI for running UVR5 in Kaggle / Jupyter Notebooks.
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 import ipywidgets as widgets
 from IPython.display import display, Audio, HTML, clear_output
@@ -18,6 +19,37 @@ from uvr_kaggle import (
 
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".wma"}
+
+
+def make_audio_preview(audio_path):
+    """
+    Ensure the audio file is lightweight enough to embed safely in notebook DOM.
+    If a WAV/FLAC file is larger than 10MB, creates a fast 192kbps MP3 preview in /tmp.
+    """
+    path = Path(audio_path)
+    if not path.exists():
+        return None
+
+    # If it's already under 10 MB or is an MP3, use directly
+    if path.stat().st_size <= 10 * 1024 * 1024 or path.suffix.lower() == ".mp3":
+        return str(path)
+
+    # For large WAV/FLAC files, convert to lightweight MP3 preview in /tmp
+    preview_path = Path(f"/tmp/{path.stem}_preview.mp3")
+    if not preview_path.exists():
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(path),
+            "-b:a", "192k",
+            "-loglevel", "error",
+            str(preview_path),
+        ]
+        try:
+            subprocess.run(cmd, check=True)
+        except Exception:
+            return str(path)
+
+    return str(preview_path)
 
 
 def scan_audio_files(search_paths=None):
@@ -197,8 +229,10 @@ def create_uvr_ui():
             print(f"▶ Output Dir: {out_base_dir}")
             print("-" * 50)
 
+        created_dirs = []
+
         def do_sep(inp, alias, stem=None, extra=None):
-            return separate(
+            jdir = separate(
                 input_file=inp,
                 model_alias=alias,
                 output_dir=out_base_dir,
@@ -207,6 +241,9 @@ def create_uvr_ui():
                 output_format=fmt,
                 use_soundfile=False,
             )
+            if jdir:
+                created_dirs.append(Path(jdir))
+            return jdir
 
         try:
             with log_output:
@@ -283,30 +320,84 @@ def create_uvr_ui():
 
             # 7. Render Audio Players for outputs
             with players_output:
-                stems = [
-                    p for p in out_base_dir.rglob("*")
-                    if p.is_file() and p.suffix.lower() in {".wav", ".flac", ".mp3", ".ogg"}
-                ]
+                stems = []
+                for d in created_dirs:
+                    if d.exists():
+                        stems.extend([
+                            p for p in d.rglob("*")
+                            if p.is_file() and p.suffix.lower() in {".wav", ".flac", ".mp3", ".ogg"}
+                            and not p.name.endswith("_preview.mp3")
+                        ])
+
+                if not stems:
+                    stems = [
+                        p for p in out_base_dir.rglob("*")
+                        if p.is_file() and p.suffix.lower() in {".wav", ".flac", ".mp3", ".ogg"}
+                        and not p.name.endswith("_preview.mp3")
+                    ]
+
+                stems = sorted(list(dict.fromkeys(stems)))
+
                 if stems:
-                    display(
-                        HTML(
-                            """
-                            <h3 style="color: #22c55e; margin-top: 15px;">🎧 Separated Stems:</h3>
-                            """
-                        )
+                    rows_html = "".join([
+                        f"""<tr style="border-bottom: 1px solid #334155;">
+                            <td style="padding: 6px 10px; font-weight: 500; color: #38bdf8;">{s.name}</td>
+                            <td style="padding: 6px 10px; color: #94a3b8;">{s.stat().st_size / (1024*1024):.2f} MB</td>
+                            <td style="padding: 6px 10px; font-family: monospace; font-size: 11px; color: #64748b;">{s}</td>
+                        </tr>""" for s in stems
+                    ])
+
+                    summary_card = widgets.HTML(f"""
+                    <div style="background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-top: 10px;">
+                        <h4 style="margin: 0 0 8px 0; color: #4ade80;">🎧 Separated Stems ({len(stems)} files)</h4>
+                        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                            <thead>
+                                <tr style="border-bottom: 2px solid #475569; text-align: left; color: #e2e8f0;">
+                                    <th style="padding: 6px 10px;">File Name</th>
+                                    <th style="padding: 6px 10px;">Size</th>
+                                    <th style="padding: 6px 10px;">Location</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {rows_html}
+                            </tbody>
+                        </table>
+                    </div>
+                    """)
+
+                    stem_options = [(f"{p.name} ({p.stat().st_size / (1024*1024):.1f} MB)", str(p)) for p in stems]
+                    stem_dropdown = widgets.Dropdown(
+                        options=stem_options,
+                        value=stem_options[0][1],
+                        description="Play Stem:",
+                        style={"description_width": "85px"},
+                        layout=widgets.Layout(width="75%"),
                     )
-                    for stem in sorted(stems):
-                        size_mb = stem.stat().st_size / (1024 * 1024)
-                        display(
-                            HTML(
-                                f"""
-                                <div style="margin-top: 8px;">
-                                    <b>{stem.name}</b> <span style="color:#64748b; font-size:12px;">({size_mb:.2f} MB)</span>
-                                </div>
-                                """
-                            )
-                        )
-                        display(Audio(str(stem)))
+
+                    play_area = widgets.Output(layout=widgets.Layout(margin="10px 0"))
+
+                    def on_stem_select(change):
+                        play_area.clear_output()
+                        if change["new"]:
+                            with play_area:
+                                prev_file = make_audio_preview(change["new"])
+                                if prev_file:
+                                    display(Audio(prev_file))
+
+                    stem_dropdown.observe(on_stem_select, names="value")
+
+                    # Initial playback
+                    with play_area:
+                        init_prev = make_audio_preview(stem_options[0][1])
+                        if init_prev:
+                            display(Audio(init_prev))
+
+                    display(widgets.VBox([
+                        summary_card,
+                        widgets.HTML("<div style='margin-top: 12px; font-weight: bold; color: #f8fafc;'>Select stem to play:</div>"),
+                        stem_dropdown,
+                        play_area,
+                    ]))
 
         except Exception as exc:
             with log_output:
