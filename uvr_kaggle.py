@@ -84,8 +84,44 @@ TASKS = {
 }
 
 
-def run_command(command, capture_output=False):
+def run_command(command, capture_output=False, on_progress=None):
     print("\n$", " ".join(map(str, command)))
+
+    if on_progress is not None:
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        proc = subprocess.Popen(
+            [str(x) for x in command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        buf = ""
+        output_lines = []
+        while True:
+            ch = proc.stdout.read(1)
+            if not ch and proc.poll() is not None:
+                break
+            if ch:
+                if ch in ('\r', '\n'):
+                    line = buf.strip()
+                    if line:
+                        output_lines.append(line)
+                        on_progress(line)
+                    buf = ""
+                else:
+                    buf += ch
+        if buf.strip():
+            output_lines.append(buf.strip())
+            on_progress(buf.strip())
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Command failed with exit code {proc.returncode}: "
+                f"{' '.join(map(str, command))}"
+            )
+        return "\n".join(output_lines) if capture_output else None
 
     result = subprocess.run(
         [str(x) for x in command],
@@ -232,6 +268,7 @@ def separate(
     extra_args=None,
     output_format="WAV",
     use_soundfile=False,
+    on_progress=None,
 ):
     """
     Run one model through audio-separator.
@@ -267,7 +304,7 @@ def separate(
     if extra_args:
         command.extend(extra_args)
 
-    run_command(command)
+    run_command(command, on_progress=on_progress)
 
     print(f"\nCompleted: {model_alias}")
     print(f"Output directory: {job_dir}")
