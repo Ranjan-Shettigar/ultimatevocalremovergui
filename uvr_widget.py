@@ -21,6 +21,7 @@ from uvr_kaggle import (
 
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".wma"}
 _STEM_EXTS = {".wav", ".flac", ".mp3", ".ogg"}
+UPLOAD_DIR = Path("/kaggle/working/uploads") if Path("/kaggle/working").exists() else Path("./uploads")
 
 
 # ------------------------------------------------------------------
@@ -29,7 +30,7 @@ _STEM_EXTS = {".wav", ".flac", ".mp3", ".ogg"}
 
 def _scan(paths=None):
     """Return sorted list of audio file paths found under *paths*."""
-    paths = paths or [Path("/kaggle/input"), Path("/kaggle/working"), Path(".")]
+    paths = paths or [Path("/kaggle/input"), Path("/kaggle/working"), UPLOAD_DIR, Path(".")]
     found = []
     for base in paths:
         if base.exists():
@@ -40,6 +41,41 @@ def _scan(paths=None):
                     if ".ipynb_checkpoints" not in str(p)
                 )
     return sorted(dict.fromkeys(found))
+
+
+def _extract_upload(upload_val, target_dir):
+    """
+    Extract uploaded file from widgets.FileUpload.value (compatible with ipywidgets 7 and 8)
+    and save to target_dir. Returns the Path to the saved file or None.
+    """
+    if not upload_val:
+        return None
+
+    target_dir = Path(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # ipywidgets 7: dict of {name: {'metadata': ..., 'content': bytes}}
+    if isinstance(upload_val, dict):
+        for fname, file_info in upload_val.items():
+            content = file_info.get("content")
+            if content is not None:
+                out_path = target_dir / fname
+                with open(out_path, "wb") as f:
+                    f.write(bytes(content))
+                return out_path
+
+    # ipywidgets 8: tuple or list of dicts/objects
+    elif isinstance(upload_val, (tuple, list)):
+        for item in upload_val:
+            name = getattr(item, "name", None) or (item.get("name") if isinstance(item, dict) else None)
+            content = getattr(item, "content", None) or (item.get("content") if isinstance(item, dict) else None)
+            if name and content is not None:
+                out_path = target_dir / name
+                with open(out_path, "wb") as f:
+                    f.write(bytes(content))
+                return out_path
+
+    return None
 
 
 def _preview(path_str):
@@ -162,9 +198,17 @@ def create_uvr_ui():
         options=_opts(),
         value=_opts()[1][1] if scanned else "",
         description="Input:",
-        layout=widgets.Layout(width="80%"),
+        layout=widgets.Layout(width="58%"),
     )
-    scan_btn = widgets.Button(description="⟳", tooltip="Rescan", layout=widgets.Layout(width="15%"))
+    scan_btn = widgets.Button(description="⟳", tooltip="Rescan discovered files", layout=widgets.Layout(width="10%"))
+    upload_btn = widgets.FileUpload(
+        accept="audio/*,.mp3,.wav,.flac,.m4a,.ogg,.aac,.wma",
+        multiple=False,
+        description="Upload",
+        tooltip="Upload an audio file from your computer",
+        layout=widgets.Layout(width="28%"),
+    )
+    upload_status = widgets.HTML("", layout=widgets.Layout(margin="0 0 2px 0"))
     input_text = widgets.Text(
         value=scanned[0] if scanned else "",
         placeholder="/path/to/audio.mp3",
@@ -178,6 +222,22 @@ def create_uvr_ui():
             file_dd.value = file_dd.options[1][1]
             input_text.value = file_dd.value
     scan_btn.on_click(_on_scan)
+
+    def _on_upload(change):
+        val = change.get("new")
+        if not val:
+            return
+        saved = _extract_upload(val, UPLOAD_DIR)
+        if saved and saved.exists():
+            size_mb = saved.stat().st_size / (1024 * 1024)
+            upload_status.value = (
+                f"<div style='font-size:12px;color:#16a34a;margin:2px 0;'>"
+                f"✓ Uploaded <b>{saved.name}</b> ({size_mb:.1f} MB)</div>"
+            )
+            input_text.value = str(saved)
+            file_dd.options = _opts()
+            file_dd.value = str(saved)
+    upload_btn.observe(_on_upload, names="value")
 
     def _on_dd(change):
         if change["new"] and change["new"] != "__CUSTOM__":
@@ -454,7 +514,8 @@ def create_uvr_ui():
     # --- Layout ---
     display(widgets.VBox([
         header,
-        widgets.HBox([file_dd, scan_btn]),
+        widgets.HBox([file_dd, scan_btn, upload_btn]),
+        upload_status,
         input_text,
         task_dd,
         widgets.HBox([fmt_dd, fp16_cb]),
